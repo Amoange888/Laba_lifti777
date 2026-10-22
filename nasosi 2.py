@@ -1,229 +1,531 @@
+
+
 import tkinter as tk
-from tkinter import ttk
-import time
-from threading import Thread, Lock
+CYCLE_MS = 100
+PUMP_RATE = 2.0
+LEAK_STEP = 1.0
+LEAK_MAX = 4
+INITIAL_LEVEL = 77.0
+LEVEL_START_1 = 50
+LEVEL_START_2 = 25
+LEVEL_STOP = 100
+
+WIDTH, HEIGHT = 1000, 680
+
+# ---- Палитра ----
+BG          = "#141922"
+BG_PANEL    = "#1e2633"
+PANEL_EDGE  = "#2f3b4d"
+
+TEXT        = "#e6edf5"
+TEXT_DIM    = "#7a8ca3"
+ACCENT      = "#3fc1c9"
+
+TANK_BG     = "#0d131c"
+TANK_EDGE   = "#3a4a60"
+WATER       = "#2e8bc0"
+WATER_HI    = "#4fb3e8"
+WATER_DARK  = "#1c5f8a"
+
+PIPE        = "#3a4a60"
+PIPE_HI     = "#5b6f8a"
+
+PUMP_OFF    = "#2a3444"
+PUMP_OFF_E  = "#4a5a74"
+PUMP_ON     = "#2ecc71"
+PUMP_ON_E   = "#1f9c52"
+PUMP_ERR    = "#e74c3c"
+PUMP_ERR_E  = "#a02a1e"
+
+BTN         = "#2a3444"
+BTN_HOVER   = "#38465a"
+BTN_EDGE    = "#4a5a74"
+BTN_ACTIVE  = "#3fc1c9"
+BTN_ACTIVE_DK = "#2a8b92"
+BTN_DANGER  = "#8a3030"
+BTN_DANGER_H = "#a83a3a"
+
+RED         = "#e74c3c"
+GREEN       = "#2ecc71"
+
+
+# ============================================================
+#  МОДЕЛЬ
+# ============================================================
+class Pump:
+    def __init__(self, pid):
+        self.id = pid
+        self.running = False
+        self.error = False
+        self.work_time = 0
+
 
 class PumpSystem:
     def __init__(self):
-        self.capacity = 500.0
-        self.level = 0.0
-        self.pump_rate = 10.0
-        self.drain_rate = 0.0
-        self.max_drain = 20.0           
-        self.pumps = {
-            0: {"name": "Насос A", "runtime": 0.0, "broken": False, "active": False},
-            1: {"name": "Насос B", "runtime": 0.0, "broken": False, "active": False},
-            2: {"name": "Насос C", "runtime": 0.0, "broken": False, "active": False},
-        }
-        self.lock = Lock()
+        self.pumps = [Pump(1), Pump(2), Pump(3)]
+        self.level = INITIAL_LEVEL
+        self.cycle_counter = 0
+        self.leak = 3
+        self.started = False
+        self.system_error = False
 
-    def get_working_pumps(self):
-        return [i for i, p in self.pumps.items() if not p["broken"]]
+    def step(self):
+        if not self.started:
+            return
+        self.cycle_counter += 1
 
-    def select_active_pumps(self):
-        working = self.get_working_pumps()
-        if len(working) < 2:
-            return working
-        return sorted(working, key=lambda i: self.pumps[i]["runtime"])[:2]
+        for p in self.pumps:
+            if p.running and not p.error:
+                p.work_time += 1
 
-    def update_active(self, need_pumps: bool):
-        for p in self.pumps.values():
-            p["active"] = False
-        if not need_pumps:
-            return []
-        active = self.select_active_pumps()
-        for i in active:
-            self.pumps[i]["active"] = True
-        return active
+        for p in self.pumps:
+            if p.running and p.error:
+                p.running = False
 
-    def break_pump(self, idx):
-        with self.lock:
-            self.pumps[idx]["broken"] = True
-            self.pumps[idx]["active"] = False
+        running = sum(1 for p in self.pumps if p.running)
+        self.level += running * PUMP_RATE - self.leak * LEAK_STEP
+        self.level = max(0.0, min(100.0, self.level))
 
-    def repair_pump(self, idx):
-        with self.lock:
-            self.pumps[idx]["broken"] = False
+        self._control()
 
-    def step(self, dt_minutes):
-        with self.lock:
-            need_pumps = (self.level < self.capacity) or (self.drain_rate > 0)
+    def _control(self):
+        if not any(not p.error for p in self.pumps):
+            self.system_error = True
+            for p in self.pumps:
+                p.running = False
+            return
+        self.system_error = False
 
-            active = self.update_active(need_pumps)
-            inflow = len(active) * self.pump_rate
-            outflow = self.drain_rate
+        if self.level >= LEVEL_STOP:
+            for p in self.pumps:
+                p.running = False
+            return
 
-            net = (inflow - outflow) * dt_minutes
-            self.level = max(0.0, min(self.capacity, self.level + net))
+        running = sum(1 for p in self.pumps if p.running)
 
-            for i in active:
-                self.pumps[i]["runtime"] += dt_minutes
+        if self.level < LEVEL_START_1 and running == 0:
+            if self._start_one():
+                running += 1
+        if self.level < LEVEL_START_2 and running < 2:
+            self._start_one()
 
-            return inflow, outflow
+    def _start_one(self):
+        candidates = [p for p in self.pumps if not p.error and not p.running]
+        if not candidates:
+            return False
+        pump = min(candidates, key=lambda p: p.work_time)
+        pump.running = True
+        return True
 
-    def set_drain_rate(self, rate):
-        with self.lock:
-            self.drain_rate = max(0.0, min(self.max_drain, rate))
+    def toggle_error(self, idx):
+        p = self.pumps[idx]
+        p.error = not p.error
+        if p.error:
+            p.running = False
 
-    def reset_runtimes(self):
-        with self.lock:
-            for p in self.pumps.values():
-                p["runtime"] = 0.0
+    def toggle_start(self):
+        self.started = not self.started
 
+    def leak_up(self):
+        if self.leak < LEAK_MAX:
+            self.leak += 1
+
+    def leak_down(self):
+        if self.leak > 0:
+            self.leak -= 1
+
+
+# ============================================================
+#  UI — координаты (фиксированная сетка)
+# ============================================================
+# Верхняя полоса (заголовок + кнопка + счётчики)
+TOP_H = 80
+
+# Левая панель: БАК
+TANK_PANEL = (20, 100, 280, 660)     # x1, y1, x2, y2
+TANK_X, TANK_Y = 60, 160
+TANK_W, TANK_H = 170, 440
+
+# Правая панель: НАСОСЫ (низ)
+PUMPS_PANEL = (620, 420, 980, 660)
+PUMP_W, PUMP_H = 100, 60
+PUMP_Y = 480
+PUMP_XS = [645, 755, 865]            # левые края насосов
+ERR_BTN_Y = PUMP_Y + PUMP_H + 16
+ERR_BTN_H = 32
+
+# Правая панель: РАСХОД (верх)
+LEAK_PANEL = (620, 100, 980, 400)
+LEAK_P_X1, LEAK_P_Y1, LEAK_P_X2, LEAK_P_Y2 = LEAK_PANEL
+
+# Кнопка "Запуск"
+START_RECT = (30, 20, 180, 62)
+
+# Счётчики в верхней полосе
+STAT_CYCLE_RECT = (400, 20, 620, 62)
+STAT_STATE_RECT = (640, 20, 860, 62)
+
+
+# ============================================================
+#  ПРИЛОЖЕНИЕ
+# ============================================================
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Система насосов + кран")
-        self.root.geometry("800x620")
+        self.root.title("Система управления насосами")
+        self.root.geometry(f"{WIDTH}x{HEIGHT}")
+        self.root.configure(bg=BG)
         self.root.resizable(False, False)
 
         self.system = PumpSystem()
-        self.stop_flag = False
-        self.create_widgets()
-        self.update_gui()
 
-    def create_widgets(self):
-        frame_tank = ttk.LabelFrame(self.root, text="Резервуар", padding=10)
-        frame_tank.pack(fill="x", padx=10, pady=5)
+        self.canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT,
+                                bg=BG, highlightthickness=0)
+        self.canvas.pack()
 
-        self.level_var = tk.StringVar(value="0.0 / 500 л")
-        ttk.Label(frame_tank, textvariable=self.level_var, font=("Arial", 14, "bold")).pack()
+        self.clickables = []
+        self._build_clickables()
 
-        self.progress = ttk.Progressbar(frame_tank, length=520, maximum=500)
-        self.progress.pack(pady=5)
+        self.canvas.bind("<Button-1>", self.on_click)
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.hover_zone = None
 
-        self.canvas = tk.Canvas(frame_tank, width=540, height=120, bg="#e0e0e0")
-        self.canvas.pack(pady=5)
-        self.canvas.create_rectangle(10, 10, 530, 110, outline="#333", width=3)
-        self.water = self.canvas.create_rectangle(12, 110, 528, 110, fill="#4fc3f7", outline="")
+        self.tick()
 
-        frame_drain = ttk.LabelFrame(self.root, text="Кран (максимум 20 л/мин = 2 насоса)", padding=10)
-        frame_drain.pack(fill="x", padx=10, pady=5)
+    # --------------------------------------------------------
+    #  Зоны кликов
+    # --------------------------------------------------------
+    def _build_clickables(self):
+        # Запуск
+        self.clickables.append(("start", *START_RECT, self.on_start))
 
-        ttk.Label(frame_drain, text="Расход крана:").pack(side="left")
-        self.drain_var = tk.DoubleVar(value=0.0)
-        ttk.Scale(frame_drain, from_=0, to=20, variable=self.drain_var,
-                  orient="horizontal", length=300, command=self.on_drain_change).pack(side="left", padx=10)
-        self.drain_label = ttk.Label(frame_drain, text="0.0 л/мин", width=12)
-        self.drain_label.pack(side="left")
+        # Стрелки расхода
+        cx = (LEAK_P_X1 + LEAK_P_X2) // 2
 
-        frame_pumps = ttk.LabelFrame(self.root, text="Насосы (по 10 л/мин)", padding=10)
-        frame_pumps.pack(fill="x", padx=10, pady=5)
+        up_y1 = LEAK_P_Y1 + 60
+        up_y2 = up_y1 + 44
+        self.clickables.append(
+            ("leak_up", cx - 45, up_y1, cx + 45, up_y2, self.on_leak_up))
 
-        self.pump_labels = {}
-        self.pump_status = {}
-        self.btn_break = {}
-        self.btn_repair = {}
+        down_y2 = LEAK_P_Y2 - 20
+        down_y1 = down_y2 - 44
+        self.clickables.append(
+            ("leak_down", cx - 45, down_y1, cx + 45, down_y2,
+             self.on_leak_down))
 
-        for i in range(3):
-            row = ttk.Frame(frame_pumps)
-            row.pack(fill="x", pady=3)
+        # Кнопки "Ошибка" под насосами
+        for i, x in enumerate(PUMP_XS):
+            self.clickables.append((
+                f"err_{i}",
+                x, ERR_BTN_Y,
+                x + PUMP_W, ERR_BTN_Y + ERR_BTN_H,
+                (lambda idx=i: self.on_error(idx))))
 
-            ttk.Label(row, text=f"{self.system.pumps[i]['name']}:", width=12).pack(side="left")
-            status = ttk.Label(row, text="Стоп", width=14, foreground="gray")
-            status.pack(side="left", padx=5)
-            self.pump_status[i] = status
+    def on_click(self, event):
+        for name, x1, y1, x2, y2, cb in self.clickables:
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                cb()
+                return
 
-            runtime = ttk.Label(row, text="0.0 мин", width=12)
-            runtime.pack(side="left")
-            self.pump_labels[i] = runtime
+    def on_motion(self, event):
+        self.hover_zone = None
+        for name, x1, y1, x2, y2, cb in self.clickables:
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                self.hover_zone = name
+                self.canvas.config(cursor="hand2")
+                return
+        self.canvas.config(cursor="")
 
-            btn_b = ttk.Button(row, text="Сломать", width=10, command=lambda idx=i: self.break_pump(idx))
-            btn_b.pack(side="left", padx=5)
-            self.btn_break[i] = btn_b
+    # --------------------------------------------------------
+    #  Обработчики
+    # --------------------------------------------------------
+    def on_start(self):
+        self.system.toggle_start()
 
-            btn_r = ttk.Button(row, text="Починить", width=10, state="disabled", command=lambda idx=i: self.repair_pump(idx))
-            btn_r.pack(side="left")
-            self.btn_repair[i] = btn_r
+    def on_error(self, idx):
+        self.system.toggle_error(idx)
 
-        frame_ctrl = ttk.Frame(self.root, padding=10)
-        frame_ctrl.pack(fill="x")
+    def on_leak_up(self):
+        self.system.leak_up()
 
-        self.btn_start = ttk.Button(frame_ctrl, text="▶ Старт", command=self.start_sim)
-        self.btn_start.pack(side="left", padx=5)
+    def on_leak_down(self):
+        self.system.leak_down()
 
-        self.btn_stop = ttk.Button(frame_ctrl, text="⏹ Стоп", command=self.stop_sim, state="disabled")
-        self.btn_stop.pack(side="left", padx=5)
+    # --------------------------------------------------------
+    #  Цикл
+    # --------------------------------------------------------
+    def tick(self):
+        self.system.step()
+        self.draw()
+        self.root.after(CYCLE_MS, self.tick)
 
-        ttk.Button(frame_ctrl, text="Сбросить время", command=self.reset_time).pack(side="left", padx=5)
+    # --------------------------------------------------------
+    #  Отрисовка
+    # --------------------------------------------------------
+    def draw(self):
+        c = self.canvas
+        c.delete("all")
+        sys = self.system
 
-        ttk.Label(frame_ctrl, text="Скорость:").pack(side="left", padx=(20, 5))
-        self.speed_var = tk.DoubleVar(value=1.0)
-        ttk.Scale(frame_ctrl, from_=0.2, to=5.0, variable=self.speed_var, orient="horizontal", length=120).pack(side="left")
+        # ---- верхняя полоса ----
+        c.create_rectangle(0, 0, WIDTH, TOP_H,
+                           fill=BG_PANEL, outline="")
+        c.create_line(0, TOP_H, WIDTH, TOP_H,
+                      fill=PANEL_EDGE, width=1)
 
-        self.info_var = tk.StringVar(value="Готов. Нажмите Старт.")
-        ttk.Label(self.root, textvariable=self.info_var, font=("Arial", 10), foreground="#0ceb04").pack(pady=5)
+        # заголовок (по центру верхней полосы, но чтобы не мешал — сверху)
+        c.create_text(WIDTH // 2, 16,
+                      text="СИСТЕМА УПРАВЛЕНИЯ НАСОСАМИ",
+                      fill=TEXT, font=("Segoe UI", 12, "bold"))
 
-        self.flow_var = tk.StringVar(value="Приток: 0  |  Слив: 0  |  Баланс: 0")
-        ttk.Label(self.root, textvariable=self.flow_var, font=("Arial", 10)).pack()
+        # кнопка Запуск
+        start_label = "ПАУЗА" if sys.started else "ЗАПУСК"
+        self._button(*START_RECT, start_label,
+                     accent=True, hover=(self.hover_zone == "start"))
 
-    def on_drain_change(self, value):
-        rate = float(value)
-        self.system.set_drain_rate(rate)
-        self.drain_label.config(text=f"{rate:.1f} л/мин")
+        # счётчики
+        self._stat_box(*STAT_CYCLE_RECT, "ЦИКЛОВ", str(sys.cycle_counter))
+        self._stat_box(*STAT_STATE_RECT, "СОСТОЯНИЕ",
+                       "РАБОТА" if sys.started else "СТОП")
 
-    def break_pump(self, idx):
-        self.system.break_pump(idx)
-        self.btn_break[idx].config(state="disabled")
-        self.btn_repair[idx].config(state="normal")
-        self.info_var.set(f"{self.system.pumps[idx]['name']} сломан")
+        # ---- панели ----
+        self._panel(*TANK_PANEL)
+        self._panel(*PUMPS_PANEL)
+        self._panel(*LEAK_PANEL)
 
-    def repair_pump(self, idx):
-        self.system.repair_pump(idx)
-        self.btn_break[idx].config(state="normal")
-        self.btn_repair[idx].config(state="disabled")
-        self.info_var.set(f"{self.system.pumps[idx]['name']} починен")
+        # =========================================================
+        #  ТРУБЫ
+        # =========================================================
+        bus_y = 400                       # высота горизонтальной шины
+        bus_x_left = PUMP_XS[0] + PUMP_W // 2
+        bus_x_right = TANK_X + TANK_W + 40
 
-    def reset_time(self):
-        self.system.reset_runtimes()
-        self.info_var.set("Время сброшено")
+        # 1) от насосов вверх до шины
+        for x in PUMP_XS:
+            cx = x + PUMP_W // 2
+            c.create_line(cx, PUMP_Y, cx, bus_y, fill=PIPE, width=9)
+            c.create_line(cx, PUMP_Y, cx, bus_y, fill=PIPE_HI, width=4)
 
-    def start_sim(self):
-        self.stop_flag = False
-        self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
-        self.info_var.set("Работает...")
-        Thread(target=self.simulation_loop, daemon=True).start()
+        # 2) горизонтальная шина
+        c.create_line(bus_x_left, bus_y, bus_x_right, bus_y,
+                      fill=PIPE, width=9)
+        c.create_line(bus_x_left, bus_y, bus_x_right, bus_y,
+                      fill=PIPE_HI, width=4)
 
-    def stop_sim(self):
-        self.stop_flag = True
-        self.btn_start.config(state="normal")
-        self.btn_stop.config(state="disabled")
-        self.info_var.set("Остановлено")
+        # 3) от шины к баку — по вертикали вверх, затем в бак сбоку
+        tank_mid_y = TANK_Y + TANK_H // 2
+        c.create_line(bus_x_right, bus_y, bus_x_right, tank_mid_y,
+                      fill=PIPE, width=9)
+        c.create_line(bus_x_right, bus_y, bus_x_right, tank_mid_y,
+                      fill=PIPE_HI, width=4)
+        c.create_line(TANK_X + TANK_W, tank_mid_y, bus_x_right, tank_mid_y,
+                      fill=PIPE, width=9)
+        c.create_line(TANK_X + TANK_W, tank_mid_y, bus_x_right, tank_mid_y,
+                      fill=PIPE_HI, width=4)
 
-    def simulation_loop(self):
-        last = time.time()
-        while not self.stop_flag:
-            now = time.time()
-            dt = (now - last) * self.speed_var.get()
-            last = now
+        # 4) выход из бака — снизу
+        out_x = TANK_X + TANK_W // 2
+        out_y = TANK_Y + TANK_H
+        c.create_line(out_x, out_y, out_x, out_y + 40,
+                      fill=PIPE, width=9)
+        c.create_line(out_x, out_y, out_x, out_y + 40,
+                      fill=PIPE_HI, width=4)
+        c.create_line(out_x, out_y + 40, out_x + 90, out_y + 40,
+                      fill=PIPE, width=9)
+        c.create_line(out_x, out_y + 40, out_x + 90, out_y + 40,
+                      fill=PIPE_HI, width=4)
+        c.create_line(out_x + 90, out_y + 40, out_x + 90, out_y + 70,
+                      fill=PIPE, width=9)
+        c.create_line(out_x + 90, out_y + 40, out_x + 90, out_y + 70,
+                      fill=PIPE_HI, width=4)
 
-            inflow, outflow = self.system.step(dt)
-            balance = inflow - outflow
-            text = f"Приток: {inflow:.1f} л/мин  |  Слив: {outflow:.1f} л/мин  |  Баланс: {balance:+.1f} л/мин"
-            self.root.after(0, lambda t=text: self.flow_var.set(t))
-            time.sleep(0.05)
+        # =========================================================
+        #  БАК
+        # =========================================================
+        c.create_rectangle(TANK_X - 2, TANK_Y - 2,
+                           TANK_X + TANK_W + 2, TANK_Y + TANK_H + 2,
+                           fill=TANK_BG, outline=TANK_EDGE, width=2)
 
-    def update_gui(self):
-        level = self.system.level
-        self.level_var.set(f"{level:.1f} / 500 л ({level/5:.1f}%)")
-        self.progress["value"] = level
+        fill_h = int((TANK_H - 4) * sys.level / 100.0)
+        if fill_h > 0:
+            x1 = TANK_X + 2
+            x2 = TANK_X + TANK_W - 2
+            y1 = TANK_Y + TANK_H - 2 - fill_h
+            y2 = TANK_Y + TANK_H - 2
+            c.create_rectangle(x1, y1, x2, y2, fill=WATER, outline="")
+            c.create_rectangle(x1, y1, x2, y1 + 5,
+                               fill=WATER_HI, outline="")
+            c.create_rectangle(x1, y2 - 3, x2, y2,
+                               fill=WATER_DARK, outline="")
 
-        h = int((level / 500) * 98)
-        self.canvas.coords(self.water, 12, 110 - h, 528, 110)
+        # шкала справа от бака
+        for pct in (0, 25, 50, 75, 100):
+            y = TANK_Y + TANK_H - int(TANK_H * pct / 100.0)
+            c.create_line(TANK_X + TANK_W + 2, y,
+                          TANK_X + TANK_W + 12, y,
+                          fill=TANK_EDGE, width=2)
+            c.create_text(TANK_X + TANK_W + 32, y,
+                          text=f"{pct}%",
+                          fill=TEXT_DIM,
+                          font=("Segoe UI", 9, "bold"))
 
-        for i, p in self.system.pumps.items():
-            self.pump_labels[i].config(text=f"{p['runtime']:.1f} мин")
-            if p["broken"]:
-                self.pump_status[i].config(text="СЛОМАН", foreground="red")
-            elif p["active"]:
-                self.pump_status[i].config(text="▶ Работает", foreground="green")
+        # подпись над баком
+        c.create_text(TANK_X + TANK_W // 2, TANK_Y - 35,
+                      text="БАК", fill=ACCENT,
+                      font=("Segoe UI", 12, "bold"))
+        c.create_text(TANK_X + TANK_W // 2, TANK_Y - 15,
+                      text=f"{int(sys.level)} %", fill=TEXT,
+                      font=("Segoe UI", 11, "bold"))
+
+        # =========================================================
+        #  НАСОСЫ
+        # =========================================================
+        for i, x in enumerate(PUMP_XS):
+            p = sys.pumps[i]
+            if p.error:
+                body, edge = PUMP_ERR, PUMP_ERR_E
+            elif p.running:
+                body, edge = PUMP_ON, PUMP_ON_E
             else:
-                self.pump_status[i].config(text="Стоп", foreground="gray")
+                body, edge = PUMP_OFF, PUMP_OFF_E
 
-        self.root.after(100, self.update_gui)
+            if p.running and not p.error:
+                c.create_rectangle(x - 3, PUMP_Y - 3,
+                                   x + PUMP_W + 3, PUMP_Y + PUMP_H + 3,
+                                   outline=GREEN, width=2)
+
+            c.create_rectangle(x, PUMP_Y,
+                               x + PUMP_W, PUMP_Y + PUMP_H,
+                               fill=body, outline=edge, width=2)
+
+            # индикатор
+            c.create_oval(x + 10, PUMP_Y + 10,
+                          x + 24, PUMP_Y + 24,
+                          fill="#ffffff" if (p.running and not p.error) else "#1a2028",
+                          outline=edge, width=2)
+
+            # номер
+            c.create_text(x + PUMP_W // 2 + 6, PUMP_Y + PUMP_H // 2,
+                          text=str(p.id), fill=TEXT,
+                          font=("Segoe UI", 18, "bold"))
+
+            # наработка над насосом
+            c.create_text(x + PUMP_W // 2, PUMP_Y - 14,
+                          text=f"наработка: {p.work_time}",
+                          fill=TEXT_DIM,
+                          font=("Segoe UI", 9, "bold"))
+
+            # кнопка "Ошибка / Сброс"
+            self._button(
+                x, ERR_BTN_Y,
+                x + PUMP_W, ERR_BTN_Y + ERR_BTN_H,
+                "Сброс" if p.error else "Ошибка",
+                danger=p.error,
+                hover=(self.hover_zone == f"err_{i}"))
+
+        # =========================================================
+        #  ПАНЕЛЬ РАСХОДА
+        # =========================================================
+        self._draw_leak_panel(sys)
+
+        # ---- ошибка системы ----
+        if sys.system_error:
+            c.create_rectangle(WIDTH // 2 - 160, HEIGHT - 32,
+                               WIDTH // 2 + 160, HEIGHT - 6,
+                               fill="#3a1a1a", outline=RED, width=2)
+            c.create_text(WIDTH // 2, HEIGHT - 19,
+                          text="⚠ ВСЕ НАСОСЫ НЕИСПРАВНЫ",
+                          fill=RED,
+                          font=("Segoe UI", 11, "bold"))
+
+    # --------------------------------------------------------
+    #  Вспомогательные рисовалки
+    # --------------------------------------------------------
+    def _panel(self, x1, y1, x2, y2):
+        self.canvas.create_rectangle(x1, y1, x2, y2,
+                                     fill=BG_PANEL, outline=PANEL_EDGE,
+                                     width=1)
+
+    def _button(self, x1, y1, x2, y2, text,
+                accent=False, danger=False, hover=False):
+        c = self.canvas
+        if danger:
+            bg = BTN_DANGER_H if hover else BTN_DANGER
+            edge = RED
+            fg = "#ffdede"
+        elif accent:
+            bg = BTN_ACTIVE_DK if hover else BTN_ACTIVE
+            edge = "#6ee6ec"
+            fg = "#0a1a1c"
+        else:
+            bg = BTN_HOVER if hover else BTN
+            edge = BTN_EDGE
+            fg = TEXT
+
+        c.create_rectangle(x1 + 2, y1 + 2, x2 + 2, y2 + 2,
+                           fill="#0a0e14", outline="")
+        c.create_rectangle(x1, y1, x2, y2,
+                           fill=bg, outline=edge, width=2)
+        c.create_text((x1 + x2) // 2, (y1 + y2) // 2,
+                      text=text, fill=fg,
+                      font=("Segoe UI", 11, "bold"))
+
+    def _stat_box(self, x1, y1, x2, y2, label, value):
+        c = self.canvas
+        c.create_rectangle(x1, y1, x2, y2,
+                           fill=BG, outline=PANEL_EDGE, width=1)
+        c.create_text((x1 + x2) // 2, y1 + 12,
+                      text=label, fill=TEXT_DIM,
+                      font=("Segoe UI", 8, "bold"))
+        c.create_text((x1 + x2) // 2, (y1 + y2) // 2 + 10,
+                      text=value, fill=ACCENT,
+                      font=("Segoe UI", 16, "bold"))
+
+    def _draw_leak_panel(self, sys):
+        c = self.canvas
+        x0, y0 = LEAK_P_X1, LEAK_P_Y1
+        x1, y1 = LEAK_P_X2, LEAK_P_Y2
+        cx = (x0 + x1) // 2
+
+        c.create_text(cx, y0 + 22,
+                      text="РАСХОД ВОДЫ", fill=ACCENT,
+                      font=("Segoe UI", 12, "bold"))
+
+        up_y1 = y0 + 55
+        up_y2 = up_y1 + 44
+        self._button(cx - 45, up_y1, cx + 45, up_y2, "▲",
+                     hover=(self.hover_zone == "leak_up"))
+
+        down_y2 = y1 - 18
+        down_y1 = down_y2 - 44
+        self._button(cx - 45, down_y1, cx + 45, down_y2, "▼",
+                     hover=(self.hover_zone == "leak_down"))
+
+        # значение
+        mid_y = (up_y2 + down_y1) // 2
+        c.create_text(cx, mid_y - 8,
+                      text=str(sys.leak), fill=WATER_HI,
+                      font=("Segoe UI", 40, "bold"))
+        c.create_text(cx, mid_y + 30,
+                      text=f"из {LEAK_MAX}", fill=TEXT_DIM,
+                      font=("Segoe UI", 9))
+
+        # индикатор-полоски
+        bar_y = mid_y + 52
+        seg_w = (x1 - x0 - 60) / LEAK_MAX
+        for i in range(LEAK_MAX):
+            sx = x0 + 30 + i * seg_w
+            color = WATER if i < sys.leak else "#25303f"
+            c.create_rectangle(sx + 2, bar_y,
+                               sx + seg_w - 2, bar_y + 9,
+                               fill=color, outline=PANEL_EDGE)
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = App(root)
-    root.mainloop()
+    main()
